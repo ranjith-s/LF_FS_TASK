@@ -3,7 +3,7 @@
 // ============================================================================
 
 const express = require('express');
-const { Sequelize, DataTypes } = require('sequelize');
+const { Sequelize, DataTypes, Op } = require('sequelize');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 require('dotenv').config();
@@ -15,7 +15,7 @@ app.use(express.json());
 // DATABASE CONNECTION
 // ============================================================================
 
-const missingEnv = ['DB_NAME', 'DB_USER'].filter((key) => !process.env[key]);
+const missingEnv = ['DB_NAME', 'DB_USER', 'JWT_SECRET'].filter((key) => !process.env[key]);
 if (missingEnv.length) {
     console.error(`✗ Missing required environment variables: ${missingEnv.join(', ')}`);
     process.exit(1);
@@ -99,9 +99,33 @@ Like.belongsTo(Comment, { foreignKey: 'comment_id', as: 'comment' });
 // ============================================================================
 
 const authenticateToken = (req, res, next) => {
-    // TODO: implement authentication
-    next()
+    const [scheme, token] = (req.headers.authorization || '').split(' ');
+    if (scheme !== 'Bearer' || !token) {
+        return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    try {
+        const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+        req.user = { id: Number(payload.sub) };
+        next();
+    } catch {
+        res.status(401).json({ error: 'Invalid or expired token' });
+    }
 };
+
+const signToken = (user) => jwt.sign(
+    { sub: String(user.id) },
+    process.env.JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
+);
+
+const toPublicUser = (user) => ({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    profile_picture_url: user.profile_picture_url,
+    bio: user.bio
+});
 
 const errorHandler = (err, req, res, next) => {
     console.error('Error:', err);
@@ -109,6 +133,31 @@ const errorHandler = (err, req, res, next) => {
         error: err.message || 'Internal server error'
     });
 };
+
+// ============================================================================
+// AUTH ENDPOINTS
+// ============================================================================
+
+// LOGIN
+app.post('/api/auth/login', async (req, res, next) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password required' });
+        }
+
+        const user = await User.findOne({ where: { email } });
+        const isValid = user && await bcrypt.compare(password, user.password_hash);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        res.json({ token: signToken(user), user: toPublicUser(user) });
+    } catch (error) {
+        next(error);
+    }
+});
 
 // ============================================================================
 // USER ENDPOINTS
@@ -158,14 +207,18 @@ app.post('/api/users', async (req, res, next) => {
     try {
         const { username, email, password, bio } = req.body;
 
-        // Validate
         if (!username || !email || !password) {
             return res.status(400).json({ error: 'Username, email, and password required' });
         }
+        if (password.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
 
-        // Check if user exists
-        const exists = await User.findOne({ where: { email } });
-        if (exists) return res.status(400).json({ error: 'Email already registered' });
+        const existing = await User.findOne({ where: { [Op.or]: [{ email }, { username }] } });
+        if (existing) {
+            const field = existing.email === email ? 'Email' : 'Username';
+            return res.status(409).json({ error: `${field} already registered` });
+        }
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -176,11 +229,7 @@ app.post('/api/users', async (req, res, next) => {
             bio: bio || ''
         });
 
-        res.status(201).json({
-            id: user.id,
-            username: user.username,
-            email: user.email
-        });
+        res.status(201).json({ token: signToken(user), user: toPublicUser(user) });
     } catch (error) {
         next(error);
     }
@@ -253,7 +302,7 @@ app.get('/api/posts/:id', async (req, res, next) => {
 });
 
 // CREATE post
-app.post('/api/posts', async (req, res, next) => {
+app.post('/api/posts', authenticateToken, async (req, res, next) => {
     try {
         const { title, content, image_url } = req.body;
 
@@ -279,7 +328,7 @@ app.post('/api/posts', async (req, res, next) => {
 });
 
 // UPDATE post
-app.put('/api/posts/:id', async (req, res, next) => {
+app.put('/api/posts/:id', authenticateToken, async (req, res, next) => {
     try {
         const post = await Post.findByPk(req.params.id);
 
@@ -300,7 +349,7 @@ app.put('/api/posts/:id', async (req, res, next) => {
 });
 
 // DELETE post
-app.delete('/api/posts/:id', async (req, res, next) => {
+app.delete('/api/posts/:id', authenticateToken, async (req, res, next) => {
     try {
         const post = await Post.findByPk(req.params.id);
 
@@ -321,7 +370,7 @@ app.delete('/api/posts/:id', async (req, res, next) => {
 // ============================================================================
 
 // CREATE comment
-app.post('/api/posts/:postId/comments', async (req, res, next) => {
+app.post('/api/posts/:postId/comments', authenticateToken, async (req, res, next) => {
     try {
         const { content } = req.body;
 
@@ -366,7 +415,7 @@ app.get('/api/posts/:postId/comments', async (req, res, next) => {
 });
 
 // DELETE comment
-app.delete('/api/comments/:id', async (req, res, next) => {
+app.delete('/api/comments/:id', authenticateToken, async (req, res, next) => {
     try {
         const comment = await Comment.findByPk(req.params.id);
 
@@ -387,7 +436,7 @@ app.delete('/api/comments/:id', async (req, res, next) => {
 // ============================================================================
 
 // LIKE a post
-app.post('/api/posts/:postId/like', async (req, res, next) => {
+app.post('/api/posts/:postId/like', authenticateToken, async (req, res, next) => {
     try {
         // Check if already liked
         const existingLike = await Like.findOne({
@@ -419,7 +468,7 @@ app.post('/api/posts/:postId/like', async (req, res, next) => {
 });
 
 // UNLIKE a post
-app.delete('/api/posts/:postId/unlike', async (req, res, next) => {
+app.delete('/api/posts/:postId/unlike', authenticateToken, async (req, res, next) => {
     try {
         const like = await Like.findOne({
             where: {
