@@ -2,10 +2,10 @@
   "name": "social-media-app",
   "version": "1.0.0",
   "description": "Full-stack social media application with MySQL, Express, React",
-  "main": "backend_express.js",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node backend_express.js",
-    "dev:api": "node --watch backend_express.js",
+    "start": "node server/index.js",
+    "dev:api": "node --watch server/index.js",
     "dev:web": "vite",
     "build": "vite build",
     "test": "echo \"Error: no test specified\" && exit 1"
