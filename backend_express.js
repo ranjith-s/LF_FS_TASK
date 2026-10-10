@@ -113,6 +113,11 @@ const authenticateToken = (req, res, next) => {
     }
 };
 
+const optionalAuth = (req, res, next) => {
+    if (!req.headers.authorization) return next();
+    authenticateToken(req, res, next);
+};
+
 const signToken = (user) => jwt.sign(
     { sub: String(user.id) },
     process.env.JWT_SECRET,
@@ -249,6 +254,13 @@ const commentCountAttribute = [
     'comment_count'
 ];
 
+const likedByMeAttribute = (userId) => [
+    sequelize.literal(
+        `EXISTS(SELECT 1 FROM likes AS l WHERE l.post_id = \`Post\`.\`id\` AND l.comment_id IS NULL AND l.user_id = ${sequelize.escape(userId)})`
+    ),
+    'liked_by_me'
+];
+
 const encodeCursor = (post) =>
     Buffer.from(`${post.created_at.toISOString()}|${post.id}`).toString('base64url');
 
@@ -261,7 +273,7 @@ const decodeCursor = (cursor) => {
 };
 
 // GET feed
-app.get('/api/posts', async (req, res, next) => {
+app.get('/api/posts', optionalAuth, async (req, res, next) => {
     try {
         const requestedLimit = parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE;
         const limit = Math.min(Math.max(requestedLimit, 1), MAX_PAGE_SIZE);
@@ -280,7 +292,9 @@ app.get('/api/posts', async (req, res, next) => {
 
         const rows = await Post.findAll({
             where,
-            attributes: { include: [commentCountAttribute] },
+            attributes: {
+                include: [commentCountAttribute, ...(req.user ? [likedByMeAttribute(req.user.id)] : [])]
+            },
             include: [{ model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES }],
             order: [['created_at', 'DESC'], ['id', 'DESC']],
             limit: limit + 1
@@ -290,7 +304,7 @@ app.get('/api/posts', async (req, res, next) => {
         const posts = hasMore ? rows.slice(0, limit) : rows;
 
         res.json({
-            posts,
+            posts: posts.map((post) => ({ ...post.toJSON(), liked_by_me: Boolean(post.get('liked_by_me')) })),
             next_cursor: hasMore ? encodeCursor(posts[posts.length - 1]) : null
         });
     } catch (error) {
