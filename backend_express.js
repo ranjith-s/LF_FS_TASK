@@ -239,31 +239,60 @@ app.post('/api/users', async (req, res, next) => {
 // POST ENDPOINTS
 // ============================================================================
 
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 50;
+
+const AUTHOR_ATTRIBUTES = ['id', 'username', 'profile_picture_url'];
+
+const commentCountAttribute = [
+    sequelize.literal('(SELECT COUNT(*) FROM comments AS c WHERE c.post_id = `Post`.`id`)'),
+    'comment_count'
+];
+
+const encodeCursor = (post) =>
+    Buffer.from(`${post.created_at.toISOString()}|${post.id}`).toString('base64url');
+
+const decodeCursor = (cursor) => {
+    const [createdAt, id] = Buffer.from(cursor, 'base64url').toString().split('|');
+    const date = new Date(createdAt);
+    const postId = Number(id);
+    if (Number.isNaN(date.getTime()) || !Number.isInteger(postId)) return null;
+    return { createdAt: date, id: postId };
+};
+
 // GET feed
 app.get('/api/posts', async (req, res, next) => {
     try {
+        const requestedLimit = parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE;
+        const limit = Math.min(Math.max(requestedLimit, 1), MAX_PAGE_SIZE);
+
+        let where = {};
+        if (req.query.cursor) {
+            const cursor = decodeCursor(req.query.cursor);
+            if (!cursor) return res.status(400).json({ error: 'Invalid cursor' });
+            where = {
+                [Op.or]: [
+                    { created_at: { [Op.lt]: cursor.createdAt } },
+                    { created_at: cursor.createdAt, id: { [Op.lt]: cursor.id } }
+                ]
+            };
+        }
+
         const rows = await Post.findAll({
-            include: [
-                {
-                    model: User,
-                    as: 'author',
-                    attributes: ['id', 'username', 'profile_picture_url']
-                },
-                {
-                    model: Comment,
-                    as: 'comments',
-                    attributes: ['id']
-                }
-            ],
-            order: [['created_at', 'DESC']]
+            where,
+            attributes: { include: [commentCountAttribute] },
+            include: [{ model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES }],
+            order: [['created_at', 'DESC'], ['id', 'DESC']],
+            limit: limit + 1
         });
 
-        const posts = rows.map(post => ({
-            ...post.toJSON(),
-            comment_count: post.comments.length
-        }));
+        const hasMore = rows.length > limit;
+        const posts = hasMore ? rows.slice(0, limit) : rows;
 
-        res.json({ posts });
+        res.json({
+            posts,
+            next_cursor: hasMore ? encodeCursor(posts[posts.length - 1]) : null
+        });
     } catch (error) {
         next(error);
     }
@@ -438,28 +467,19 @@ app.delete('/api/comments/:id', authenticateToken, async (req, res, next) => {
 // LIKE a post
 app.post('/api/posts/:postId/like', authenticateToken, async (req, res, next) => {
     try {
-        // Check if already liked
-        const existingLike = await Like.findOne({
-            where: {
-                user_id: req.user.id,
-                post_id: req.params.postId,
-                comment_id: null
-            }
-        });
-
-        if (existingLike) {
-            return res.status(400).json({ error: 'Already liked' });
-        }
-
-        // Add like
-        await Like.create({
-            user_id: req.user.id,
-            post_id: req.params.postId
-        });
-
-        // Update post likes count
         const post = await Post.findByPk(req.params.postId);
-        await post.increment('likes_count');
+        if (!post) return res.status(404).json({ error: 'Post not found' });
+
+        const created = await sequelize.transaction(async (transaction) => {
+            const [, isNew] = await Like.findOrCreate({
+                where: { user_id: req.user.id, post_id: post.id, comment_id: null },
+                transaction
+            });
+            if (isNew) await post.increment('likes_count', { transaction });
+            return isNew;
+        });
+
+        if (!created) return res.status(409).json({ error: 'Already liked' });
 
         res.status(201).json({ message: 'Post liked' });
     } catch (error) {
@@ -470,23 +490,24 @@ app.post('/api/posts/:postId/like', authenticateToken, async (req, res, next) =>
 // UNLIKE a post
 app.delete('/api/posts/:postId/unlike', authenticateToken, async (req, res, next) => {
     try {
-        const like = await Like.findOne({
-            where: {
-                user_id: req.user.id,
-                post_id: req.params.postId,
-                comment_id: null
+        const post = await Post.findByPk(req.params.postId);
+        if (!post) return res.status(404).json({ error: 'Post not found' });
+
+        const removed = await sequelize.transaction(async (transaction) => {
+            const deleted = await Like.destroy({
+                where: { user_id: req.user.id, post_id: post.id, comment_id: null },
+                transaction
+            });
+            if (deleted) {
+                await Post.decrement('likes_count', {
+                    where: { id: post.id, likes_count: { [Op.gt]: 0 } },
+                    transaction
+                });
             }
+            return deleted > 0;
         });
 
-        if (!like) return res.status(404).json({ error: 'Like not found' });
-
-        await like.destroy();
-
-        // Update post likes count
-        const post = await Post.findByPk(req.params.postId);
-        if (post.likes_count > 0) {
-            await post.decrement('likes_count');
-        }
+        if (!removed) return res.status(404).json({ error: 'Like not found' });
 
         res.json({ message: 'Post unliked' });
     } catch (error) {
@@ -506,30 +527,15 @@ app.get('/api/trending', async (req, res, next) => {
 
         const posts = await Post.findAll({
             where: {
-                created_at: { [require('sequelize').Op.gte]: sevenDaysAgo }
+                created_at: { [Op.gte]: sevenDaysAgo }
             },
-            include: [
-                {
-                    model: User,
-                    as: 'author',
-                    attributes: ['id', 'username']
-                },
-                {
-                    model: Comment,
-                    as: 'comments',
-                    attributes: ['id']
-                }
-            ],
+            attributes: { include: [commentCountAttribute] },
+            include: [{ model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES }],
             order: [['likes_count', 'DESC']],
-            limit: 20
+            limit: DEFAULT_PAGE_SIZE
         });
 
-        const result = posts.map(post => ({
-            ...post.toJSON(),
-            comment_count: post.comments.length
-        }));
-
-        res.json(result);
+        res.json(posts);
     } catch (error) {
         next(error);
     }
@@ -542,30 +548,27 @@ app.get('/api/trending', async (req, res, next) => {
 // SEARCH posts
 app.get('/api/search', async (req, res, next) => {
     try {
-        const { q } = req.query;
+        const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
-        if (!q || q.trim().length === 0) {
+        if (!q) {
             return res.status(400).json({ error: 'Search query required' });
         }
+        if (q.length > 100) {
+            return res.status(400).json({ error: 'Search query too long' });
+        }
 
-        const { Op } = require('sequelize');
+        const pattern = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
 
         const posts = await Post.findAll({
             where: {
                 [Op.or]: [
-                    { title: { [Op.like]: `%${q}%` } },
-                    { content: { [Op.like]: `%${q}%` } }
+                    { title: { [Op.like]: pattern } },
+                    { content: { [Op.like]: pattern } }
                 ]
             },
-            include: [
-                {
-                    model: User,
-                    as: 'author',
-                    attributes: ['username']
-                }
-            ],
+            include: [{ model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES }],
             order: [['created_at', 'DESC']],
-            limit: 20
+            limit: DEFAULT_PAGE_SIZE
         });
 
         res.json(posts);
