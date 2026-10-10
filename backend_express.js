@@ -15,10 +15,17 @@ app.use(express.json());
 // DATABASE CONNECTION
 // ============================================================================
 
-const sequelize = new Sequelize('social_media_db', 'root', 'password', {
-  host: 'host',
-  dialect: 'mysql', 
-  logging: console.log
+const missingEnv = ['DB_NAME', 'DB_USER'].filter((key) => !process.env[key]);
+if (missingEnv.length) {
+    console.error(`✗ Missing required environment variables: ${missingEnv.join(', ')}`);
+    process.exit(1);
+}
+
+const sequelize = new Sequelize(process.env.DB_NAME, process.env.DB_USER, process.env.DB_PASSWORD, {
+    host: process.env.DB_HOST || 'localhost',
+    port: Number(process.env.DB_PORT) || 3306,
+    dialect: 'mysql',
+    logging: process.env.DB_LOGGING === 'true' ? console.log : false
 });
 
 
