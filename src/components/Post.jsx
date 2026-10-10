@@ -134,6 +134,7 @@ const Post = ({ post, onLike, onDelete, onCommentCountChange }) => {
                             placeholder="Write a comment..."
                             value={newComment}
                             onChange={(e) => setNewComment(e.target.value)}
+                            maxLength={2000}
                         />
                         <button className="button" type="submit" disabled={submitting || !newComment.trim()}>
                             Post

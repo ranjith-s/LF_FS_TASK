@@ -29,11 +29,6 @@ const sequelize = new Sequelize(process.env.DB_NAME, process.env.DB_USER, proces
 });
 
 
-// Test connection
-sequelize.authenticate()
-    .then(() => console.log('✓ Database connected'))
-    .catch(err => console.error('✗ Database connection failed:', err));
-
 // ============================================================================
 // MODEL DEFINITIONS
 // Define Sequelize models based on schema.sql
@@ -124,7 +119,7 @@ const signToken = (user) => jwt.sign(
     { algorithm: 'HS256', expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
 );
 
-const toPublicUser = (user) => ({
+const toSessionUser = (user) => ({
     id: user.id,
     username: user.username,
     email: user.email,
@@ -132,11 +127,45 @@ const toPublicUser = (user) => ({
     bio: user.bio
 });
 
+const PUBLIC_USER_ATTRIBUTES = ['id', 'username', 'profile_picture_url', 'bio', 'created_at'];
+
+const LIMITS = { title: 200, postContent: 10000, comment: 2000, email: 100, url: 255 };
+const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,50}$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const asText = (value) => (typeof value === 'string' ? value.trim() : '');
+
+const isHttpUrl = (value) => {
+    try {
+        return ['http:', 'https:'].includes(new URL(value).protocol);
+    } catch {
+        return false;
+    }
+};
+
+const validatePostInput = ({ title, content, image_url: imageUrl }) => {
+    if (!title || !content) return 'Title and content required';
+    if (title.length > LIMITS.title) return `Title must be at most ${LIMITS.title} characters`;
+    if (content.length > LIMITS.postContent) return `Content must be at most ${LIMITS.postContent} characters`;
+    if (imageUrl && (imageUrl.length > LIMITS.url || !isHttpUrl(imageUrl))) {
+        return 'Image URL must be a valid http(s) URL';
+    }
+    return null;
+};
+
 const errorHandler = (err, req, res, next) => {
-    console.error('Error:', err);
-    res.status(err.status || 500).json({
-        error: err.message || 'Internal server error'
-    });
+    if (err.name === 'SequelizeValidationError') {
+        return res.status(400).json({ error: err.errors[0]?.message || 'Invalid input' });
+    }
+    if (err.name === 'SequelizeUniqueConstraintError') {
+        return res.status(409).json({ error: 'Resource already exists' });
+    }
+    if (err.status >= 400 && err.status < 500) {
+        return res.status(err.status).json({ error: err.expose ? err.message : 'Bad request' });
+    }
+
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error' });
 };
 
 // ============================================================================
@@ -146,7 +175,8 @@ const errorHandler = (err, req, res, next) => {
 // LOGIN
 app.post('/api/auth/login', async (req, res, next) => {
     try {
-        const { email, password } = req.body;
+        const email = asText(req.body.email).toLowerCase();
+        const password = typeof req.body.password === 'string' ? req.body.password : '';
 
         if (!email || !password) {
             return res.status(400).json({ error: 'Email and password required' });
@@ -158,7 +188,7 @@ app.post('/api/auth/login', async (req, res, next) => {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
-        res.json({ token: signToken(user), user: toPublicUser(user) });
+        res.json({ token: signToken(user), user: toSessionUser(user) });
     } catch (error) {
         next(error);
     }
@@ -172,7 +202,8 @@ app.post('/api/auth/login', async (req, res, next) => {
 app.get('/api/users', async (req, res, next) => {
     try {
         const users = await User.findAll({
-            attributes: { exclude: ['password_hash'] },
+            attributes: PUBLIC_USER_ATTRIBUTES,
+            order: [['id', 'ASC']],
             limit: 100
         });
         res.json(users);
@@ -185,7 +216,7 @@ app.get('/api/users', async (req, res, next) => {
 app.get('/api/users/:id', async (req, res, next) => {
     try {
         const user = await User.findByPk(req.params.id, {
-            attributes: { exclude: ['password_hash'] }
+            attributes: PUBLIC_USER_ATTRIBUTES
         });
 
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -210,13 +241,22 @@ app.get('/api/users/:id', async (req, res, next) => {
 // CREATE user
 app.post('/api/users', async (req, res, next) => {
     try {
-        const { username, email, password, bio } = req.body;
+        const username = asText(req.body.username);
+        const email = asText(req.body.email).toLowerCase();
+        const password = typeof req.body.password === 'string' ? req.body.password : '';
+        const bio = asText(req.body.bio);
 
         if (!username || !email || !password) {
             return res.status(400).json({ error: 'Username, email, and password required' });
         }
-        if (password.length < 8) {
-            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        if (!USERNAME_PATTERN.test(username)) {
+            return res.status(400).json({ error: 'Username must be 3-50 characters: letters, numbers or underscores' });
+        }
+        if (email.length > LIMITS.email || !EMAIL_PATTERN.test(email)) {
+            return res.status(400).json({ error: 'A valid email is required' });
+        }
+        if (password.length < 8 || Buffer.byteLength(password) > 72) {
+            return res.status(400).json({ error: 'Password must be between 8 and 72 characters' });
         }
 
         const existing = await User.findOne({ where: { [Op.or]: [{ email }, { username }] } });
@@ -231,10 +271,10 @@ app.post('/api/users', async (req, res, next) => {
             username,
             email,
             password_hash: hashedPassword,
-            bio: bio || ''
+            bio
         });
 
-        res.status(201).json({ token: signToken(user), user: toPublicUser(user) });
+        res.status(201).json({ token: signToken(user), user: toSessionUser(user) });
     } catch (error) {
         next(error);
     }
@@ -317,23 +357,14 @@ app.get('/api/posts/:id', async (req, res, next) => {
     try {
         const post = await Post.findByPk(req.params.id, {
             include: [
-                {
-                    model: User,
-                    as: 'author',
-                    attributes: ['id', 'username', 'profile_picture_url']
-                },
+                { model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES },
                 {
                     model: Comment,
                     as: 'comments',
-                    include: [
-                        {
-                            model: User,
-                            as: 'author',
-                            attributes: ['id', 'username', 'profile_picture_url']
-                        }
-                    ]
+                    include: [{ model: User, as: 'author', attributes: AUTHOR_ATTRIBUTES }]
                 }
-            ]
+            ],
+            order: [[{ model: Comment, as: 'comments' }, 'created_at', 'DESC']]
         });
 
         if (!post) return res.status(404).json({ error: 'Post not found' });
@@ -347,24 +378,18 @@ app.get('/api/posts/:id', async (req, res, next) => {
 // CREATE post
 app.post('/api/posts', authenticateToken, async (req, res, next) => {
     try {
-        const { title, content, image_url } = req.body;
+        const input = {
+            title: asText(req.body.title),
+            content: asText(req.body.content),
+            image_url: asText(req.body.image_url) || null
+        };
 
-        if (!title || !content) {
-            return res.status(400).json({ error: 'Title and content required' });
-        }
+        const validationError = validatePostInput(input);
+        if (validationError) return res.status(400).json({ error: validationError });
 
-        const post = await Post.create({
-            user_id: req.user.id,
-            title,
-            content,
-            image_url: image_url || null
-        });
+        const post = await Post.create({ ...input, user_id: req.user.id });
 
-        res.status(201).json({
-            id: post.id,
-            title: post.title,
-            content: post.content
-        });
+        res.status(201).json(post);
     } catch (error) {
         next(error);
     }
@@ -380,12 +405,19 @@ app.put('/api/posts/:id', authenticateToken, async (req, res, next) => {
             return res.status(403).json({ error: 'Not authorized' });
         }
 
-        await post.update({
-            title: req.body.title || post.title,
-            content: req.body.content || post.content
-        });
+        const { title, content, image_url: imageUrl } = req.body;
+        const input = {
+            title: title === undefined ? post.title : asText(title),
+            content: content === undefined ? post.content : asText(content),
+            image_url: imageUrl === undefined ? post.image_url : asText(imageUrl) || null
+        };
 
-        res.json({ message: 'Post updated' });
+        const validationError = validatePostInput(input);
+        if (validationError) return res.status(400).json({ error: validationError });
+
+        await post.update(input);
+
+        res.json(post);
     } catch (error) {
         next(error);
     }
@@ -402,7 +434,7 @@ app.delete('/api/posts/:id', authenticateToken, async (req, res, next) => {
         }
 
         await post.destroy();
-        res.json({ message: 'Post deleted' });
+        res.status(204).end();
     } catch (error) {
         next(error);
     }
@@ -415,22 +447,21 @@ app.delete('/api/posts/:id', authenticateToken, async (req, res, next) => {
 // CREATE comment
 app.post('/api/posts/:postId/comments', authenticateToken, async (req, res, next) => {
     try {
-        const { content } = req.body;
+        const content = asText(req.body.content);
 
         if (!content) {
             return res.status(400).json({ error: 'Content required' });
         }
+        if (content.length > LIMITS.comment) {
+            return res.status(400).json({ error: `Comment must be at most ${LIMITS.comment} characters` });
+        }
 
-        const comment = await Comment.create({
-            post_id: req.params.postId,
-            user_id: req.user.id,
-            content
-        });
+        const post = await Post.findByPk(req.params.postId, { attributes: ['id'] });
+        if (!post) return res.status(404).json({ error: 'Post not found' });
 
-        res.status(201).json({
-            id: comment.id,
-            content: comment.content
-        });
+        const comment = await Comment.create({ post_id: post.id, user_id: req.user.id, content });
+
+        res.status(201).json(comment);
     } catch (error) {
         next(error);
     }
@@ -468,7 +499,7 @@ app.delete('/api/comments/:id', authenticateToken, async (req, res, next) => {
         }
 
         await comment.destroy();
-        res.json({ message: 'Comment deleted' });
+        res.status(204).end();
     } catch (error) {
         next(error);
     }
@@ -595,22 +626,24 @@ app.get('/api/search', async (req, res, next) => {
 // ERROR HANDLING
 // ============================================================================
 
+app.use('/api', (req, res) => res.status(404).json({ error: 'Route not found' }));
+
 app.use(errorHandler);
 
 // ============================================================================
-// SYNC DATABASE AND START SERVER
+// START SERVER
 // ============================================================================
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-sequelize.sync({ alter: false })
+sequelize.authenticate()
     .then(() => {
-        app.listen(PORT, () => {
-            console.log(`✓ Server running on http://localhost:${PORT}`);
-        });
+        console.log('✓ Database connected');
+        app.listen(PORT, () => console.log(`✓ Server running on port ${PORT}`));
     })
-    .catch(err => {
-        console.error('✗ Failed to sync database:', err);
+    .catch((err) => {
+        console.error('✗ Database connection failed:', err.message);
+        process.exit(1);
     });
 
 module.exports = app;

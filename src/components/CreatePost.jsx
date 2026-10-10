@@ -42,6 +42,7 @@ const CreatePost = ({ onPostCreated }) => {
                 rows={3}
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
+                maxLength={10000}
                 required
             />
             {error && <p className="error">{error}</p>}

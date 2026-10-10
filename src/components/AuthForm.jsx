@@ -42,7 +42,10 @@ const AuthForm = () => {
                         placeholder="Username"
                         value={form.username}
                         onChange={update('username')}
+                        minLength={3}
                         maxLength={50}
+                        pattern="[A-Za-z0-9_]+"
+                        title="3-50 characters: letters, numbers or underscores"
                         autoComplete="username"
                         required
                     />
@@ -53,6 +56,7 @@ const AuthForm = () => {
                     placeholder="Email"
                     value={form.email}
                     onChange={update('email')}
+                    maxLength={100}
                     autoComplete="email"
                     required
                 />
@@ -63,6 +67,7 @@ const AuthForm = () => {
                     value={form.password}
                     onChange={update('password')}
                     minLength={isLogin ? undefined : 8}
+                    maxLength={isLogin ? undefined : 72}
                     autoComplete={isLogin ? 'current-password' : 'new-password'}
                     required
                 />
