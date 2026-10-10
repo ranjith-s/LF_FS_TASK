@@ -46,7 +46,7 @@ const User = sequelize.define('User', {
     password_hash: { type: DataTypes.STRING(255), allowNull: false },
     profile_picture_url: { type: DataTypes.STRING(255) },
     bio: { type: DataTypes.TEXT }
-}, { tableName: 'users', timestamps: true, underscored: true });
+}, { tableName: 'users', timestamps: true, underscored: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
 const Post = sequelize.define('Post', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -55,7 +55,7 @@ const Post = sequelize.define('Post', {
     content: { type: DataTypes.TEXT, allowNull: false },
     image_url: { type: DataTypes.STRING(255) },
     likes_count: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
-}, { tableName: 'posts', timestamps: true, underscored: true });
+}, { tableName: 'posts', timestamps: true, underscored: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
 const Comment = sequelize.define('Comment', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -63,14 +63,14 @@ const Comment = sequelize.define('Comment', {
     user_id: { type: DataTypes.INTEGER, allowNull: false },
     content: { type: DataTypes.TEXT, allowNull: false },
     likes_count: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
-}, { tableName: 'comments', timestamps: true, underscored: true });
+}, { tableName: 'comments', timestamps: true, underscored: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
 const Like = sequelize.define('Like', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     user_id: { type: DataTypes.INTEGER, allowNull: false },
     post_id: { type: DataTypes.INTEGER },
     comment_id: { type: DataTypes.INTEGER }
-}, { tableName: 'likes', timestamps: true, updatedAt: false, underscored: true });
+}, { tableName: 'likes', timestamps: true, underscored: true, createdAt: 'created_at', updatedAt: false });
 
 // ============================================================================
 // ASSOCIATIONS
@@ -131,28 +131,16 @@ app.get('/api/users', async (req, res, next) => {
 app.get('/api/users/:id', async (req, res, next) => {
     try {
         const user = await User.findByPk(req.params.id, {
-            attributes: { exclude: ['password_hash'] },
-            include: [
-                {
-                    model: Post,
-                    as: 'posts',
-                    attributes: ['id'],
-                    through: { attributes: [] }
-                },
-                {
-                    model: Comment,
-                    as: 'comments',
-                    attributes: ['id']
-                }
-            ]
+            attributes: { exclude: ['password_hash'] }
         });
 
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Calculate stats
-        const postsCount = await Post.count({ where: { user_id: user.id } });
-        const commentsCount = await Comment.count({ where: { user_id: user.id } });
-        const postsLikes = await Post.sum('likes_count', { where: { user_id: user.id } });
+        const [postsCount, commentsCount, postsLikes] = await Promise.all([
+            Post.count({ where: { user_id: user.id } }),
+            Comment.count({ where: { user_id: user.id } }),
+            Post.sum('likes_count', { where: { user_id: user.id } })
+        ]);
 
         res.json({
             ...user.toJSON(),

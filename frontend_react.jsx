@@ -90,9 +90,9 @@ const Post = ({ post, onLike, onDelete, userId }) => {
     return (
         <div className="post">
             <div className="post-header">
-                <img src={post.profile_picture_url} alt={post.username} />
+                <img src={post.author?.profile_picture_url} alt={post.author?.username} />
                 <div>
-                    <h4>{post.username}</h4>
+                    <h4>{post.author?.username}</h4>
                     <small>{new Date(post.created_at).toLocaleDateString()}</small>
                 </div>
             </div>
@@ -113,9 +113,9 @@ const Post = ({ post, onLike, onDelete, userId }) => {
                 <div className="comments-section">
                     {comments.map(comment => (
                         <div key={comment.id} className="comment">
-                            <img src={comment.profile_picture_url} alt={comment.username} />
+                            <img src={comment.author?.profile_picture_url} alt={comment.author?.username} />
                             <div>
-                                <strong>{comment.username}</strong>
+                                <strong>{comment.author?.username}</strong>
                                 <p>{comment.content}</p>
                                 <small>❤️ {comment.likes_count}</small>
                             </div>
@@ -283,7 +283,7 @@ const TrendingPosts = () => {
             {posts.map(post => (
                 <div key={post.id} className="trending-item">
                     <h4>{post.title}</h4>
-                    <p>By: {post.username}</p>
+                    <p>By: {post.author?.username}</p>
                     <p>❤️ {post.likes_count} | 💬 {post.comment_count}</p>
                 </div>
             ))}
@@ -335,7 +335,7 @@ const Search = () => {
                             <div key={post.id} className="search-result">
                                 <h4>{post.title}</h4>
                                 <p>{post.content.substring(0, 100)}...</p>
-                                <p>By: {post.username}</p>
+                                <p>By: {post.author?.username}</p>
                             </div>
                         ))
                     )}
