@@ -6,34 +6,57 @@ Hey! Welcome to the interview task. Below is a Node.js + Express + Sequelize and
 
 ## Getting Started
 
-**Database setup**
+**Prerequisites:** Node.js 20.19+ (or 22.12+), MySQL 8, Yarn
 
-Make sure MySQL is running, then create the database (`social_media_db`) and load the schema:
+**1. Database**
 
-```bash
-create social_media_db
-import the schema using schema.sql
-insert the data using insert_data.sql
-```
-
-Once done, update the DB connection in `backend_express.js` with your username and password.
-
-**Backend**
+Create the database and a dedicated user, then load the schema and seed data:
 
 ```bash
-npm install
-node backend_express.js
+mysql -u root -p -e "CREATE DATABASE social_media_db; CREATE USER 'social_app'@'localhost' IDENTIFIED BY '<password>'; GRANT ALL PRIVILEGES ON social_media_db.* TO 'social_app'@'localhost';"
+mysql -u social_app -p social_media_db -e "source schema.sql; source insert_data.sql;"
 ```
 
-Runs on `http://localhost:3000`.
+**2. Environment**
 
-**Frontend**
+Copy `.env.example` to `.env` and fill in the DB credentials and a long random `JWT_SECRET`. The server won't start if `DB_NAME`, `DB_USER` or `JWT_SECRET` is missing.
+
+**3. Install and run**
 
 ```bash
-npx vite
+yarn install
+yarn dev:api    # API on http://localhost:3000 (restarts on file changes)
+yarn dev:web    # Frontend on http://localhost:5173
 ```
 
-Runs on `http://localhost:5173`. Open this in your browser.
+Open `http://localhost:5173`. In development Vite proxies `/api` to the backend, so no CORS setup is needed. For a deployment where the API lives on another origin, set `VITE_API_BASE_URL`.
+
+**Notes**
+
+- The seeded users can't log in: their `password_hash` values are SHA-256 hashes, not bcrypt. Sign up with a new account instead.
+- Trending shows posts from the last 7 days, so it's empty with the seed data (all from Jan–Feb 2026) until new posts are created.
+
+---
+
+## Project Structure
+
+```
+server/
+  index.js              # connect to the DB and start listening
+  app.js                # Express app: routes, 404, error handler
+  config.js             # reads and validates environment variables
+  models.js             # Sequelize models and associations
+  middleware/           # auth (JWT), error handler
+  routes/               # auth, users, posts (+ likes), comments, discovery (trending + search)
+  utils/                # input validation, shared query helpers
+src/
+  App.jsx               # layout, tabs, auth gate
+  api.js                # axios client: base URL, auth header, 401 handling
+  AuthContext.jsx       # login / register / logout state
+  components/           # Feed, Post, CreatePost, TrendingPosts, Search, UserProfile, AuthForm, Avatar
+  styles.css
+main.jsx                # frontend entry point
+```
 
 ---
 
@@ -47,16 +70,23 @@ This is what the working app looks like:
 
 ## API Endpoints Reference
 
+**Auth**
+```
+POST   /api/auth/login         - Log in, returns { token, user }
+POST   /api/users              - Register, returns { token, user }
+```
+
+Authenticated routes expect an `Authorization: Bearer <token>` header.
+
 **Users**
 ```
-GET    /api/users              - Get all users
+GET    /api/users              - Get all users (public fields only)
 GET    /api/users/:id          - Get user profile with stats
-POST   /api/users              - Create new user
 ```
 
 **Posts**
 ```
-GET    /api/posts              - Get feed
+GET    /api/posts              - Get feed (?limit=20&cursor=...), returns { posts, next_cursor }
 GET    /api/posts/:id          - Get post with comments
 POST   /api/posts              - Create post (auth required)
 PUT    /api/posts/:id          - Update post (auth required)
